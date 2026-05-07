@@ -60,6 +60,58 @@ public class KeycloakRealmService {
         keycloak.realms().create(realm);
         log.info("Realm creato: {}", realmName);
 
+        // Importa il client postman-client se non esiste già (DOPO la creazione del realm)
+        if (keycloak.realm(realmName).clients().findByClientId("postman-client").isEmpty()) {
+            ClientRepresentation postmanClient = new ClientRepresentation();
+            postmanClient.setClientId("postman-client");
+            postmanClient.setName("postman-client");
+            postmanClient.setDescription("");
+            postmanClient.setRootUrl("");
+            postmanClient.setAdminUrl("");
+            postmanClient.setBaseUrl("");
+            postmanClient.setSurrogateAuthRequired(false);
+            postmanClient.setEnabled(true);
+            postmanClient.setAlwaysDisplayInConsole(false);
+            postmanClient.setClientAuthenticatorType("client-secret");
+            postmanClient.setRedirectUris(java.util.List.of("/*"));
+            postmanClient.setWebOrigins(java.util.List.of("/*"));
+            postmanClient.setNotBefore(0);
+            postmanClient.setBearerOnly(false);
+            postmanClient.setConsentRequired(false);
+            postmanClient.setStandardFlowEnabled(true);
+            postmanClient.setImplicitFlowEnabled(false);
+            postmanClient.setDirectAccessGrantsEnabled(true);
+            postmanClient.setServiceAccountsEnabled(false);
+            postmanClient.setPublicClient(true);
+            postmanClient.setFrontchannelLogout(true);
+            postmanClient.setProtocol("openid-connect");
+            java.util.Map<String, String> attrs = new java.util.HashMap<>();
+            attrs.put("realm_client", "false");
+            attrs.put("logout.confirmation.enabled", "false");
+            attrs.put("oidc.ciba.grant.enabled", "false");
+            attrs.put("client.secret.creation.time", "1775416691");
+            attrs.put("backchannel.logout.session.required", "true");
+            attrs.put("standard.token.exchange.enabled", "false");
+            attrs.put("oauth2.jwt.authorization.grant.enabled", "false");
+            attrs.put("frontchannel.logout.session.required", "true");
+            attrs.put("oauth2.device.authorization.grant.enabled", "false");
+            attrs.put("display.on.consent.screen", "false");
+            attrs.put("backchannel.logout.revoke.offline.tokens", "false");
+            attrs.put("dpop.bound.access.tokens", "false");
+            postmanClient.setAttributes(attrs);
+            postmanClient.setFullScopeAllowed(true);
+            postmanClient.setNodeReRegistrationTimeout(-1);
+            postmanClient.setDefaultClientScopes(java.util.List.of(
+                "web-origins", "acr", "roles", "profile", "basic", "email"
+            ));
+            postmanClient.setOptionalClientScopes(java.util.List.of(
+                "address", "phone", "organization", "offline_access", "microprofile-jwt"
+            ));
+            keycloak.realm(realmName).clients().create(postmanClient);
+            log.info("Client postman-client importato nel realm {}", realmName);
+        }
+        // (già creato sopra)
+
         // 2. Clona il client app-cliente-A dal realm QTM
         ClientRepresentation sourceClient = keycloak.realm("QTM").clients().findByClientId("app-cliente-A").stream().findFirst().orElse(null);
         if (sourceClient == null) {
@@ -89,19 +141,35 @@ public class KeycloakRealmService {
         keycloak.realm(realmName).clients().create(newClient);
         log.info("Client clonato e creato: {}", codeRealm + "-A");
 
-        // 3. Crea i ruoli richiesti
+        // 3. Crea i ruoli richiesti sia a livello realm che client
         String[][] roles = {
             {"Admin_QTM", "Amministratore QTM"},
-            {"Doctor-HospitalReferent", "Medico Ospedaliero QTM"},
             {"Nurse_QTM", "Infermiere QTM"},
-            {"Operator_QTM", "Operatore QTM"}
+            {"Operator_QTM", "Operatore QTM"},
+            {"Doctor-HospitalReferent", "Medico Ospedaliero Referente"},
+            {"SUPER_ADMIN", "SUPER_ADMIN"}
         };
+        // Realm-level
         for (String[] r : roles) {
             RoleRepresentation role = new RoleRepresentation();
             role.setName(r[0]);
             role.setDescription(r[1]);
             keycloak.realm(realmName).roles().create(role);
-            log.info("Ruolo creato: {} - {}", r[0], r[1]);
+            log.info("Ruolo realm-level creato: {} - {}", r[0], r[1]);
+        }
+        // Client-level
+        String clientId = codeRealm + "-A";
+        var clientList = keycloak.realm(realmName).clients().findByClientId(clientId);
+        if (clientList == null || clientList.isEmpty()) {
+            throw new RuntimeException("Client appena creato non trovato per aggiunta ruoli client-level");
+        }
+        String createdClientUuid = clientList.get(0).getId();
+        for (String[] r : roles) {
+            RoleRepresentation clientRole = new RoleRepresentation();
+            clientRole.setName(r[0]);
+            clientRole.setDescription(r[1]);
+            keycloak.realm(realmName).clients().get(createdClientUuid).roles().create(clientRole);
+            log.info("Ruolo client-level creato: {} - {}", r[0], r[1]);
         }
 
         // 4. Recupera o crea l'utente francesco.tripodi
@@ -131,9 +199,14 @@ public class KeycloakRealmService {
 
         // 5. Associa tutti i ruoli all'utente francesco.tripodi
         for (String[] r : roles) {
+            // Realm-level
             RoleRepresentation realmRole = keycloak.realm(realmName).roles().get(r[0]).toRepresentation();
             keycloak.realm(realmName).users().get(userId).roles().realmLevel().add(Collections.singletonList(realmRole));
-            log.info("Ruolo {} assegnato all'utente {}", r[0], "francesco.tripodi");
+            log.info("Ruolo realm-level {} assegnato all'utente {}", r[0], "francesco.tripodi");
+            // Client-level
+            RoleRepresentation clientRole = keycloak.realm(realmName).clients().get(createdClientUuid).roles().get(r[0]).toRepresentation();
+            keycloak.realm(realmName).users().get(userId).roles().clientLevel(createdClientUuid).add(Collections.singletonList(clientRole));
+            log.info("Ruolo client-level {} assegnato all'utente {}", r[0], "francesco.tripodi");
         }
 
         // (Eliminato: duplicazione creazione ruolo/utente/password, ora gestito solo con i dati richiesti dal prompt)
