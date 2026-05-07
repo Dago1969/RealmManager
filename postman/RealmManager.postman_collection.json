@@ -1,0 +1,38 @@
+{
+  "info": {
+    "_postman_id": "b1e1e1e1-1111-2222-3333-444444444444",
+    "name": "RealmManager API",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Crea nuovo realm",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"newRealmName\": \"test-realm\",\n  \"codeRealm\": \"testcode\",\n  \"rootUrl\": \"http://localhost:3000\"\n}"
+        },
+        "url": {
+          "raw": "http://localhost:8090/api/realms",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "8090",
+          "path": [
+            "api",
+            "realms"
+          ]
+        }
+      },
+      "response": []
+    }
+  ]
+}

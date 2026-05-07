@@ -1,0 +1,3 @@
+com\qtm\realmmanager\controller\RealmController.class
+com\qtm\realmmanager\service\KeycloakRealmService.class
+com\qtm\realmmanager\RealmManagerApplication.class
