@@ -1,17 +1,30 @@
 package com.qtm.realmmanager.service;
 
+import jakarta.annotation.PostConstruct;
+import jakarta.ws.rs.core.Response;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.keycloak.OAuth2Constants;
 import org.keycloak.admin.client.CreatedResponseUtil;
 import org.keycloak.admin.client.Keycloak;
 import org.keycloak.admin.client.KeycloakBuilder;
-import org.keycloak.representations.idm.*;
+import org.keycloak.admin.client.resource.ClientResource;
+import org.keycloak.representations.idm.ClientRepresentation;
+import org.keycloak.representations.idm.CredentialRepresentation;
+import org.keycloak.representations.idm.RealmRepresentation;
+import org.keycloak.representations.idm.RoleRepresentation;
+import org.keycloak.representations.idm.UserRepresentation;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
-import jakarta.annotation.PostConstruct;
-import jakarta.ws.rs.core.Response;
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 
 /**
  * Service per la gestione di realm, ruoli e utenti su Keycloak tramite Admin Client.
@@ -22,12 +35,42 @@ import java.util.Collections;
 @RequiredArgsConstructor
 public class KeycloakRealmService {
 
-    // Configurare questi parametri secondo il proprio Keycloak
-    private final String serverUrl = "http://localhost:8085";
-    private final String masterRealm = "master";
-    private final String adminUsername = "admin";
-    private final String adminPassword = "admin";
-    private final String adminClientId = "admin-cli";
+    private static final String REALM_MANAGEMENT_CLIENT_ID = "realm-management";
+    private static final List<String> DEFAULT_ADMIN_HELPER_ROLE_NAMES = List.of(
+            "query-clients",
+            "query-users",
+            "query-realms",
+            "view-clients",
+            "view-users",
+            "view-realm",
+            "view-authorization",
+            "manage-clients",
+            "manage-users"
+    );
+
+    @Value("${app.keycloak.server-url:http://localhost:8085}")
+    private String serverUrl;
+
+    @Value("${app.keycloak.master-realm:master}")
+    private String masterRealm;
+
+    @Value("${app.keycloak.admin-username:admin}")
+    private String adminUsername;
+
+    @Value("${app.keycloak.admin-password:admin}")
+    private String adminPassword;
+
+    @Value("${app.keycloak.admin-client-id:admin-cli}")
+    private String adminClientId;
+
+    @Value("${app.keycloak.template-realm:QTM}")
+    private String templateRealm;
+
+    @Value("${app.keycloak.provisioning-client-id:admin-cli-helper}")
+    private String provisioningClientId;
+
+    @Value("${app.keycloak.provisioning-client-secret:Q5VQ0pWS6lS5N29u0xha5zodJ1LDM19h}")
+    private String provisioningClientSecret;
 
     private Keycloak keycloak;
 
@@ -112,10 +155,13 @@ public class KeycloakRealmService {
         }
         // (già creato sopra)
 
+        // Prepara il client tecnico usato dal provisioning utenti di QTMDashboard.
+        ensureProvisioningAdminClient(realmName);
+
         // 2. Clona il client app-cliente-A dal realm QTM
-        ClientRepresentation sourceClient = keycloak.realm("QTM").clients().findByClientId("app-cliente-A").stream().findFirst().orElse(null);
+        ClientRepresentation sourceClient = keycloak.realm(templateRealm).clients().findByClientId("app-cliente-A").stream().findFirst().orElse(null);
         if (sourceClient == null) {
-            throw new RuntimeException("Client sorgente app-cliente-A non trovato nel realm QTM");
+            throw new RuntimeException("Client sorgente app-cliente-A non trovato nel realm " + templateRealm);
         }
         ClientRepresentation newClient = new ClientRepresentation();
         newClient.setClientId(codeRealm + "-A");
@@ -210,5 +256,174 @@ public class KeycloakRealmService {
         }
 
         // (Eliminato: duplicazione creazione ruolo/utente/password, ora gestito solo con i dati richiesti dal prompt)
+    }
+
+    private void ensureProvisioningAdminClient(String realmName) {
+        ClientRepresentation sourceClient = findClient(templateRealm, provisioningClientId);
+        ClientRepresentation targetClient = findClient(realmName, provisioningClientId);
+
+        if (targetClient == null) {
+            ClientRepresentation newClient = buildProvisioningClientRepresentation(sourceClient);
+            keycloak.realm(realmName).clients().create(newClient);
+            log.info("Client {} creato nel realm {}", provisioningClientId, realmName);
+            targetClient = findClient(realmName, provisioningClientId);
+        } else {
+            ClientResource targetClientResource = keycloak.realm(realmName).clients().get(targetClient.getId());
+            ClientRepresentation targetRepresentation = targetClientResource.toRepresentation();
+            applyProvisioningClientSettings(targetRepresentation, sourceClient);
+            targetClientResource.update(targetRepresentation);
+            log.info("Client {} aggiornato nel realm {}", provisioningClientId, realmName);
+        }
+
+        if (targetClient == null) {
+            throw new RuntimeException("Client provisioning non trovato dopo la creazione: " + provisioningClientId);
+        }
+
+        synchronizeProvisioningServiceAccountRoles(realmName, sourceClient, targetClient);
+    }
+
+    private ClientRepresentation buildProvisioningClientRepresentation(ClientRepresentation sourceClient) {
+        ClientRepresentation clientRepresentation = new ClientRepresentation();
+        applyProvisioningClientSettings(clientRepresentation, sourceClient);
+        return clientRepresentation;
+    }
+
+    private void applyProvisioningClientSettings(ClientRepresentation targetClient, ClientRepresentation sourceClient) {
+        Map<String, String> sourceAttributes = sourceClient != null && sourceClient.getAttributes() != null
+                ? sourceClient.getAttributes()
+                : Map.of();
+
+        targetClient.setClientId(provisioningClientId);
+        targetClient.setName(provisioningClientId);
+        targetClient.setDescription(provisioningClientId);
+        targetClient.setProtocol("openid-connect");
+        targetClient.setEnabled(true);
+        targetClient.setPublicClient(false);
+        targetClient.setBearerOnly(false);
+        targetClient.setConsentRequired(false);
+        targetClient.setStandardFlowEnabled(false);
+        targetClient.setImplicitFlowEnabled(false);
+        targetClient.setDirectAccessGrantsEnabled(false);
+        targetClient.setServiceAccountsEnabled(true);
+        targetClient.setFrontchannelLogout(true);
+        targetClient.setClientAuthenticatorType("client-secret");
+        targetClient.setSecret(provisioningClientSecret);
+        targetClient.setRedirectUris(new ArrayList<>());
+        targetClient.setWebOrigins(new ArrayList<>());
+        targetClient.setBaseUrl(null);
+        targetClient.setAdminUrl(null);
+        targetClient.setRootUrl(null);
+        targetClient.setDefaultClientScopes(sourceClient != null && sourceClient.getDefaultClientScopes() != null
+                ? sourceClient.getDefaultClientScopes()
+                : List.of("web-origins", "acr", "roles", "profile", "basic", "email"));
+        targetClient.setOptionalClientScopes(sourceClient != null && sourceClient.getOptionalClientScopes() != null
+                ? sourceClient.getOptionalClientScopes()
+                : List.of("address", "phone", "organization", "offline_access", "microprofile-jwt"));
+        targetClient.setAttributes(new HashMap<>(sourceAttributes));
+        targetClient.getAttributes().put("realm_client", "false");
+        targetClient.getAttributes().put("client.secret.creation.time", String.valueOf(System.currentTimeMillis() / 1000));
+    }
+
+    private void synchronizeProvisioningServiceAccountRoles(String realmName,
+                                                           ClientRepresentation sourceClient,
+                                                           ClientRepresentation targetClient) {
+        ClientRepresentation targetRealmManagementClient = requireClient(realmName, REALM_MANAGEMENT_CLIENT_ID);
+        UserRepresentation targetServiceAccount = keycloak.realm(realmName)
+                .clients()
+                .get(targetClient.getId())
+                .getServiceAccountUser();
+
+        List<RoleRepresentation> currentRoles = keycloak.realm(realmName)
+                .users()
+                .get(targetServiceAccount.getId())
+                .roles()
+                .clientLevel(targetRealmManagementClient.getId())
+                .listAll();
+
+        // Garantisce sempre il set minimo necessario al provisioning utenti, anche se il realm template
+        // o il client sorgente hanno una configurazione parziale o non aggiornata.
+        Set<String> desiredRoleNames = new LinkedHashSet<>(DEFAULT_ADMIN_HELPER_ROLE_NAMES);
+        desiredRoleNames.addAll(resolveProvisioningRoleNamesFromTemplate(sourceClient));
+
+        Map<String, RoleRepresentation> targetRolesByName = keycloak.realm(realmName)
+                .clients()
+                .get(targetRealmManagementClient.getId())
+                .roles()
+                .list()
+                .stream()
+                .filter(Objects::nonNull)
+                .collect(java.util.stream.Collectors.toMap(RoleRepresentation::getName, role -> role, (left, right) -> left));
+
+        Set<String> currentRoleNames = currentRoles.stream()
+                .map(RoleRepresentation::getName)
+                .filter(Objects::nonNull)
+                .collect(java.util.stream.Collectors.toSet());
+
+        List<RoleRepresentation> rolesToAssign = desiredRoleNames.stream()
+                .filter(targetRolesByName::containsKey)
+                .filter(roleName -> !currentRoleNames.contains(roleName))
+                .map(targetRolesByName::get)
+                .toList();
+
+        if (!rolesToAssign.isEmpty()) {
+            keycloak.realm(realmName)
+                    .users()
+                    .get(targetServiceAccount.getId())
+                    .roles()
+                    .clientLevel(targetRealmManagementClient.getId())
+                    .add(rolesToAssign);
+            log.info("Ruoli realm-management assegnati al service account di {} nel realm {}: {}",
+                    provisioningClientId,
+                    realmName,
+                    rolesToAssign.stream().map(RoleRepresentation::getName).toList());
+        }
+    }
+
+    private List<String> resolveProvisioningRoleNamesFromTemplate(ClientRepresentation sourceClient) {
+        if (sourceClient == null || sourceClient.getId() == null) {
+            return List.of();
+        }
+
+        ClientRepresentation sourceRealmManagementClient = findClient(templateRealm, REALM_MANAGEMENT_CLIENT_ID);
+        if (sourceRealmManagementClient == null) {
+            return List.of();
+        }
+
+        UserRepresentation sourceServiceAccount = keycloak.realm(templateRealm)
+                .clients()
+                .get(sourceClient.getId())
+                .getServiceAccountUser();
+
+        if (sourceServiceAccount == null) {
+            return List.of();
+        }
+
+        return keycloak.realm(templateRealm)
+                .users()
+                .get(sourceServiceAccount.getId())
+                .roles()
+                .clientLevel(sourceRealmManagementClient.getId())
+                .listAll()
+                .stream()
+                .map(RoleRepresentation::getName)
+                .filter(Objects::nonNull)
+                .toList();
+    }
+
+    private ClientRepresentation requireClient(String realmName, String clientId) {
+        ClientRepresentation clientRepresentation = findClient(realmName, clientId);
+        if (clientRepresentation == null) {
+            throw new RuntimeException("Client " + clientId + " non trovato nel realm " + realmName);
+        }
+        return clientRepresentation;
+    }
+
+    private ClientRepresentation findClient(String realmName, String clientId) {
+        return keycloak.realm(realmName)
+                .clients()
+                .findByClientId(clientId)
+                .stream()
+                .findFirst()
+                .orElse(null);
     }
 }
